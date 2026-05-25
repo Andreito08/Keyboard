@@ -66,9 +66,11 @@ La comunicazione tra le due schede avviene con un **protocollo testuale struttur
 ## Struttura della repository
 
 ```bash
-/
-├── arduino_1.ino   # Master: tastiera analogica, LED, I2C sender
-├── arduino_2.ino   # Slave: LCD, buzzer, I2C receiver
+Keyboard/
+└── code
+     ├──  arduino_1.ino   # Master: tastiera analogica, LED, I2C sender
+     └──  arduino_2.ino   # Slave: LCD, buzzer, I2C receiver
+├── LICENSE
 └── README.md
 ```
 
