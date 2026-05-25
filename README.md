@@ -1,4 +1,4 @@
-# ⌨️ Tastiera Analogica Arduino
+# Tastiera Analogica Arduino
 
 > Sistema di input a 10 tasti costruito con un partitore resistivo, logica multi-tap stile T9 e comunicazione I2C tra due schede Arduino.
 
