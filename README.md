@@ -194,7 +194,7 @@ Entrambe incluse nell'Arduino IDE:
 
 ## Anteprima
 
-*Coming soon*
+<img width="1672" height="941" alt="GPT_Image_2" src="https://github.com/user-attachments/assets/f6ee914e-2230-4d2f-960d-21cb8308bf92" />
 
 ***
 
