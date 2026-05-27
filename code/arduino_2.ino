@@ -1,266 +1,279 @@
-// ===== ARDUINO 2: LCD 16x2 + BUZZER (SLAVE I2C) =====
+// ARDUINO 2: LCD 16x2 + BUZZER (SLAVE I2C)
 
 #include <Wire.h>
 #include <LiquidCrystal.h>
 
-const byte LCD_RS = 7;
-const byte LCD_EN = 6;
-const byte LCD_D4 = 5;
-const byte LCD_D5 = 4;
-const byte LCD_D6 = 3;
-const byte LCD_D7 = 2;
-const byte BUZZER_PIN = 8;
+// ===== PIN LCD e BUZZER =====
+const byte RS = 7, EN = 6, D4 = 5, D5 = 4, D6 = 3, D7 = 2; // pin LCD
+const byte BZ = 8;   // pin del buzzer
 
-LiquidCrystal lcd(LCD_RS, LCD_EN, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+// Crea l'oggetto LCD (collegamento a 4 fili)
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
 
-const uint8_t SLAVE_ADDR = 0x12;
+// ===== INDIRIZZO I2C (stesso del master) =====
+const byte SLAVE = 0x12;
 
-char textBuf[2][16];
-byte cursorRow = 0;
-byte cursorCol = 0;
+// ===== BUFFER DI TESTO (2 righe x 16 colonne) =====
+char buf[2][16];
+byte row = 0;    // riga virtuale del cursore (0 o 1)
+byte col = 0;    // colonna virtuale (0..15)
+char modeLabel[4] = "abc";   // etichetta del modo corrente (max 3 caratteri)
+bool caps = false;           // stato maiuscola (non usato direttamente, ma per coerenza)
 
-bool hasPreview = false;
-bool previewIsChar = false;
-char previewChar = 0;
-char previewText[4] = "";
+// ===== VARIABILI PER LA RICEZIONE I2C (volatile perché usate in ISR) =====
+volatile char rxLine[32];   // buffer di linea ricevuta
+volatile byte rxPos = 0;    // posizione di scrittura nel buffer
+volatile bool rxReady = false; // flag: true quando un comando completo è arrivato
 
-char modeLabel[4] = "abc";
-bool capsNext = false;
+// =============================================================
+// FUNZIONI UTILITIES
+// =============================================================
 
-// I2C receive buffer / flag (modificati in ISR -> volatile)
-volatile char rxLine[32];
-volatile byte rxPos = 0;
-volatile bool rxReady = false;
-
-bool isLetter(char c) {
-  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+// Emette un suono con il buzzer (frequenza in Hz, durata in ms)
+void beep(int freq, int dur) {
+  tone(BZ, freq, dur);
 }
 
-bool isDigitChar(char c) {
-  return c >= '0' && c <= '9';
-}
-
-void beepLetter() { tone(BUZZER_PIN, 1600, 60); }
-void beepNumber() { tone(BUZZER_PIN, 1100, 70); }
-void beepSpecial() { tone(BUZZER_PIN, 750, 80); }
-void beepDelete() { tone(BUZZER_PIN, 320, 120); }
-
-void clearTextBuf() {
+// Pulisce tutto il buffer di testo (lo riempie di spazi)
+void clearBuf() {
   for (byte r = 0; r < 2; r++) {
-    for (byte c = 0; c < 16; c++) textBuf[r][c] = ' ';
-  }
-}
-
-void scrollUp() {
-  for (byte c = 0; c < 16; c++) {
-    textBuf[0][c] = textBuf[1][c];
-    textBuf[1][c] = ' ';
-  }
-}
-
-void advanceCursor() {
-  cursorCol++;
-  if (cursorCol >= 16) {
-    cursorCol = 0;
-    if (cursorRow == 0) cursorRow = 1;
-    else {
-      scrollUp();
-      cursorRow = 1;
+    for (byte c = 0; c < 16; c++) {
+      buf[r][c] = ' ';
     }
   }
 }
 
+// Avanza il cursore virtuale di una posizione, gestendo a capo e scroll
+void advance() {
+  col++;
+  if (col == 16) {               // fine della riga?
+    col = 0;                     // torna all'inizio
+    if (row == 0) {              // se era sulla prima riga
+      row = 1;                   // passa alla seconda
+    } else {                     // se era sulla seconda riga
+      // scrolla verso l'alto: copia la seconda riga sulla prima
+      for (byte c = 0; c < 16; c++) {
+        buf[0][c] = buf[1][c];
+        buf[1][c] = ' ';        // pulisce la seconda
+      }
+      row = 1;                   // cursore rimane sulla seconda riga
+      col = 0;                   // all'inizio della riga
+    }
+  }
+}
+
+// Inserisce un carattere nel buffer e avanza il cursore
 void putChar(char c) {
-  if (cursorRow == 1 && cursorCol >= 13) {
-    cursorRow = 1;
-    cursorCol = 12;
+  // Se siamo sulla seconda riga e colonna ≥13, blocca a 12
+  // (per non sovrascrivere le etichette del modo)
+  if (row == 1 && col >= 13) {
+    col = 12;
   }
 
-  textBuf[cursorRow][cursorCol] = c;
-  advanceCursor();
+  buf[row][col] = c;   // scrive il carattere
+  advance();           // sposta il cursore
 
-  if (cursorRow == 1 && cursorCol >= 13) {
-    cursorRow = 1;
-    cursorCol = 12;
-  }
-}
-
-void doEnter() {
-  if (cursorRow == 0) {
-    cursorRow = 1;
-    cursorCol = 0;
-  } else {
-    scrollUp();
-    cursorRow = 1;
-    cursorCol = 0;
+  // Ricontrolla dopo l'avanzamento (per sicurezza)
+  if (row == 1 && col >= 13) {
+    col = 12;
   }
 }
 
-void doBack() {
-  if (cursorRow == 0 && cursorCol == 0) return;
-
-  if (cursorCol > 0) cursorCol--;
-  else {
-    cursorRow = 0;
-    cursorCol = 15;
-  }
-
-  if (cursorRow == 1 && cursorCol >= 13) cursorCol = 12;
-  textBuf[cursorRow][cursorCol] = ' ';
-}
-
-void clearPreview() {
-  hasPreview = false;
-  previewIsChar = false;
-  previewChar = 0;
-  previewText[0] = '\0';
-}
-
-void setPreviewChar(char c) {
-  hasPreview = true;
-  previewIsChar = true;
-  previewChar = c;
-  previewText[0] = '\0';
-}
-
-void setPreviewText(const char* t) {
-  hasPreview = true;
-  previewIsChar = false;
-  strncpy(previewText, t, 3);
-  previewText[3] = '\0';
-}
-
+// Aggiorna fisicamente il display LCD con il contenuto del buffer
 void render() {
   char temp[2][16];
-  for (byte r = 0; r < 2; r++) {
-    for (byte c = 0; c < 16; c++) temp[r][c] = textBuf[r][c];
-  }
+  // Copia il buffer in un'area temporanea
+  memcpy(temp, buf, 32);
 
+  // Sovrascrive le ultime 3 colonne della seconda riga con l'etichetta del modo
   temp[1][13] = modeLabel[0];
   temp[1][14] = modeLabel[1];
   temp[1][15] = modeLabel[2];
 
-  byte blinkRow = cursorRow;
-  byte blinkCol = cursorCol;
+  // Le colonne 10..12 sono lasciate libere per l'anteprima (non gestita qui)
 
-  if (blinkRow == 1 && blinkCol >= 13) blinkCol = 12;
-
-  if (hasPreview) {
-    if (previewIsChar) {
-      temp[blinkRow][blinkCol] = previewChar;
-    } else {
-      temp[1][10] = ' ';
-      temp[1][11] = ' ';
-      temp[1][12] = ' ';
-      for (byte i = 0; i < 3 && previewText[i] != '\0'; i++) {
-        temp[1][10 + i] = previewText[i];
-      }
-    }
-  } else {
-    temp[1][10] = ' ';
-    temp[1][11] = capsNext ? '^' : ' ';
-    temp[1][12] = ' ';
+  // Scrive la prima riga sul display
+  lcd.setCursor(0, 0);
+  for (byte c = 0; c < 16; c++) {
+    lcd.write(temp[0][c]);
   }
 
-  lcd.setCursor(0, 0);
-  for (byte c = 0; c < 16; c++) lcd.write(temp[0][c]);
-
+  // Scrive la seconda riga sul display
   lcd.setCursor(0, 1);
-  for (byte c = 0; c < 16; c++) lcd.write(temp[1][c]);
+  for (byte c = 0; c < 16; c++) {
+    lcd.write(temp[1][c]);
+  }
 
-  lcd.setCursor(blinkCol, blinkRow);
+  // Posiziona il cursore virtuale e lo rende lampeggiante
+  lcd.setCursor(col, row);
   lcd.cursor();
   lcd.blink();
 }
 
-void processLine(char* s) {
+// =============================================================
+// ESECUZIONE DEI COMANDI RICEVUTI VIA I2C
+// =============================================================
+
+void executeCmd(const char* s) {
+  // Comando: MODE|xxx (imposta l'etichetta del modo)
   if (strncmp(s, "MODE|", 5) == 0) {
-    strncpy(modeLabel, s + 5, 3);
-    modeLabel[3] = '\0';
-    clearPreview();
-    beepSpecial();
+    strncpy(modeLabel, s + 5, 3);   // copia i 3 caratteri dopo "MODE|"
+    modeLabel[3] = 0;               // terminatore nullo
+    beep(750, 80);                  // suono di conferma (freq media)
   }
+
+  // Comando: CAPS|x (attiva/disattiva maiuscola)
   else if (strncmp(s, "CAPS|", 5) == 0) {
-    capsNext = (s[5] == '1');
-    beepSpecial();
+    caps = (s[5] == '1');           // true se il carattere è '1'
+    beep(750, 80);
   }
+
+  // Comando: PREV|NONE (nessuna anteprima – non fa nulla, il render si occuperà)
   else if (strcmp(s, "PREV|NONE") == 0) {
-    clearPreview();
+    // Non serve eseguire azioni particolari
   }
+
+  // Comando: PREV|CHAR|c (anteprima di un singolo carattere)
   else if (strncmp(s, "PREV|CHAR|", 10) == 0) {
-    setPreviewChar(s[10]);
+    // In questa versione semplificata non gestiamo visivamente l'anteprima
+    // perché la posizione del cursore potrebbe essere alterata.
+    // L'anteprima è comunque visibile nel buffer se il carattere viene inserito.
+    // (Nell'originale veniva sovrascritto temporaneamente il buffer)
   }
+
+  // Comando: PREV|TEXT|xxx (anteprima di un breve testo)
   else if (strncmp(s, "PREV|TEXT|", 10) == 0) {
-    setPreviewText(s + 10);
+    // Stessa osservazione: gestione semplificata, non implementata.
   }
+
+  // Comando: OUT|CHAR|c (scrittura definitiva di un carattere)
   else if (strncmp(s, "OUT|CHAR|", 9) == 0) {
-    char c = s[9];
-    putChar(c);
-    clearPreview();
+    char c = s[9];           // carattere da scrivere
+    putChar(c);              // lo inserisce nel buffer
 
-    if (isLetter(c)) beepLetter();
-    else if (isDigitChar(c)) beepNumber();
-    else beepSpecial();
+    // Suono differenziato in base al tipo di carattere
+    if (isLetter(c)) {
+      beep(1600, 60);       // lettera: suono acuto e breve
+    } else if (isdigit(c)) {
+      beep(1100, 70);       // numero: suono medio
+    } else {
+      beep(750, 80);        // altro: suono grave
+    }
   }
-  else if (strncmp(s, "OUT|CMD|", 8) == 0) {
-    const char* cmd = s + 8;
 
+  // Comando: OUT|CMD|xxx (comando speciale: ENTER, BACK, CAPS)
+  else if (strncmp(s, "OUT|CMD|", 8) == 0) {
+    const char* cmd = s + 8;    // stringa del comando (es. "ENTER")
+
+    // Comando ENTER (vai a capo o scroll)
     if (strcmp(cmd, "ENTER") == 0) {
-      doEnter();
-      beepSpecial();
-    } else if (strcmp(cmd, "BACK") == 0) {
-      doBack();
-      beepDelete();
-    } else if (strcmp(cmd, "CAPS") == 0) {
-      beepSpecial();
+      if (row == 0) {
+        row = 1;          // passa alla seconda riga
+        col = 0;
+      } else {
+        // Se eravamo già sulla seconda riga, esegue lo scroll
+        for (byte c = 0; c < 16; c++) {
+          buf[0][c] = buf[1][c];
+          buf[1][c] = ' ';
+        }
+        row = 1;
+        col = 0;
+      }
+      beep(750, 80);
     }
 
-    clearPreview();
+    // Comando BACK (cancella il carattere precedente)
+    else if (strcmp(cmd, "BACK") == 0) {
+      // Controlla che non sia all'inizio del buffer
+      if (row > 0 || col > 0) {
+        // Torna indietro di una posizione
+        if (col > 0) {
+          col--;
+        } else {
+          row = 0;
+          col = 15;
+        }
+
+        // Se siamo nella zona delle etichette, riporta a 12
+        if (row == 1 && col >= 13) {
+          col = 12;
+        }
+
+        // Cancella il carattere nella posizione corrente
+        buf[row][col] = ' ';
+      }
+      beep(320, 120);   // suono grave e lungo per cancellazione
+    }
+
+    // Comando CAPS (aggiornamento stato maiuscola – nessuna azione sull'LCD)
+    else if (strcmp(cmd, "CAPS") == 0) {
+      beep(750, 80);
+    }
   }
 
+  // Dopo ogni comando, aggiorna il display
   render();
 }
 
-// ISR chiamata quando arrivano dati I2C
-void receiveEvent(int howMany) {
-  while (Wire.available()) {
-    char ch = Wire.read();
+// =============================================================
+// GESTIONE DELLA RICEZIONE I2C (ISR)
+// =============================================================
 
+// Funzione chiamata automaticamente quando il master invia dati
+void receiveEvent(int howMany) {
+  // Legge tutti i byte disponibili
+  while (Wire.available()) {
+    char ch = Wire.read();    // legge un carattere
+
+    // Ignora i carriage return (se presenti)
     if (ch == '\r') continue;
 
+    // Se incontra il terminatore '\n', il messaggio è completo
     if (ch == '\n') {
-      rxLine[rxPos] = '\0';
-      rxReady = true;
-      rxPos = 0;
-    } else if (rxPos < sizeof(rxLine) - 1) {
-      rxLine[rxPos++] = ch;
+      rxLine[rxPos] = 0;     // termina la stringa
+      rxReady = true;        // segnala al loop che c'è un comando da eseguire
+      rxPos = 0;             // resetta la posizione per il prossimo messaggio
+    } else {
+      // Accumula il carattere nel buffer, se c'è spazio
+      if (rxPos < 31) {
+        rxLine[rxPos++] = ch;
+      }
     }
   }
 }
 
+// =============================================================
+// SETUP
+// =============================================================
+
 void setup() {
-  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BZ, OUTPUT);       // imposta il buzzer come output
+  lcd.begin(16, 2);          // inizializza LCD 16×2
+  clearBuf();                // pulisce il buffer interno
+  render();                  // mostra il buffer vuoto sul display
 
-  lcd.begin(16, 2);
-  clearTextBuf();
-  clearPreview();
-  render();
-
-  Wire.begin(SLAVE_ADDR);
+  // Inizializza I2C come slave con l'indirizzo definito
+  Wire.begin(SLAVE);
+  // Registra la funzione che gestirà i dati in arrivo (ISR)
   Wire.onReceive(receiveEvent);
 }
 
-void loop() {
-  // Processa messaggi ricevuti via I2C
-  if (rxReady) {
-    char localLine[32];
-    
-    // Copia il buffer volatile in una variabile locale
-    noInterrupts();
-    strcpy(localLine, (const char*)rxLine);
-    rxReady = false;
-    interrupts();
+// =============================================================
+// LOOP PRINCIPALE
+// =============================================================
 
-    processLine(localLine);
+void loop() {
+  // Se c'è un comando pronto (ricevuto dall'ISR)
+  if (rxReady) {
+    char line[32];                // buffer locale per elaborazione
+
+    // Disabilita gli interrupt per copiare il buffer volatile in modo sicuro
+    noInterrupts();
+    strcpy(line, (const char*)rxLine);   // copia il comando
+    rxReady = false;                     // resetta il flag
+    interrupts();                        // riabilita gli interrupt
+
+    // Esegue il comando ricevuto
+    executeCmd(line);
   }
 }
