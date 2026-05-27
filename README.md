@@ -58,7 +58,7 @@ La comunicazione tra le due schede avviene con un **protocollo testuale struttur
 ### Collegamento I2C
 
 - `SDA` (A4) e `SCL` (A5) collegati tra le due schede
-- Resistenze di pull-up da 4.7 kΩ su SDA e SCL
+- Consigliate resistenze di pull-up da 4.7 kΩ su SDA e SCL
 - Massa comune tra i due Arduino
 
 ***
